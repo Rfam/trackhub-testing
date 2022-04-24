@@ -1,0 +1,18 @@
+[tool.poetry]
+name = "rfam_trackhubs"
+version = "0.1.0"
+description = ""
+authors = ["Blake Sweeney <bsweeney@ebi.ac.uk>"]
+
+[tool.poetry.dependencies]
+python = "^3.9"
+biopython = "^1.79"
+click = "^8.1.2"
+humanfriendly = "^10.0"
+attrs = "^21.4.0"
+
+[tool.poetry.dev-dependencies]
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"

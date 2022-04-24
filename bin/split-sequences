@@ -1,0 +1,156 @@
+#!/usr/bin/env python3
+
+# -*- coding: utf-8 -*-
+
+"""
+Copyright [2009-2018] EMBL-European Bioinformatics Institute
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+http://www.apache.org/licenses/LICENSE-2.0
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+"""
+
+import os
+import typing as ty
+
+from attrs import define, field
+from attrs.validators import optional
+from attrs.validators import instance_of as is_a
+
+import click
+import humanfriendly
+
+from Bio import SeqIO
+
+
+@define()
+class Chunk:
+    sequences: ty.List[SeqIO.SeqRecord] = field(default=[], validator=is_a(list))
+    nucleotide_count: int = field(default=0, validator=is_a(int))
+    file_size: int = field(default=0, validator=is_a(int))
+
+    def add(self, sequence):
+        self.sequences.append(sequence)
+        self.nucleotide_count += len(sequence)
+        self.file_size += 1  # Length of > in bytes
+        self.file_size += len(sequence.id.encode('utf-8'))
+        self.file_size += len(sequence.description.encode('utf-8'))
+        self.file_size += len(str(sequence.seq).encode('utf-8'))
+
+    def empty(self):
+        self.sequences = []
+        self.file_size = 0
+        self.nucleotide_count = 0
+
+    @property
+    def sequence_count(self):
+        return len(self.sequences)
+
+
+@define(frozen=True)
+class Limit:
+    max_sequences: ty.Optional[int] = field(validator=optional(is_a(int)))
+    max_nucleotides: ty.Optional[int] = field(validator=optional(is_a(int)))
+    max_file_size: ty.Optional[int] = field(validator=optional(is_a(int)))
+
+    @classmethod
+    def build(cls, max_sequences, max_nucleotides, max_file_size):
+        def parse_existing(parser, value, **kwargs):
+            if value is not None:
+                return parser(value, **kwargs)
+            return None
+
+        def parse_int(value):
+            return int(float(value))
+
+        return cls(
+            max_sequences=parse_existing(parse_int, max_sequences),
+            max_nucleotides=parse_existing(parse_int, max_nucleotides),
+            max_file_size=parse_existing(humanfriendly.parse_size, max_file_size,
+                                         binary=True),
+        )
+
+    def is_too_large(self, chunk) -> bool:
+        if self.max_sequences:
+            if chunk.sequence_count >= self.max_sequences:
+                return True
+        if self.max_nucleotides:
+            if chunk.nucleotide_count >= self.max_nucleotides:
+                return True
+        if self.max_file_size:
+            if chunk.file_size >= self.max_file_size:
+                return True
+        return False
+
+
+def chunked(handle, limit, format_name='fasta'):
+    chunk = Chunk()
+    if format_name == 'ncr':
+        format_name = 'embl'
+    for sequence in SeqIO.parse(handle, format_name):
+        if len(sequence.seq) == 0:
+            continue
+        chunk.add(sequence)
+        if limit.is_too_large(chunk):
+            yield chunk.sequences
+            chunk.empty()
+
+    if chunk.sequences:
+        yield chunk.sequences
+
+
+@click.command()
+@click.option('--format-name', default='fasta')
+@click.option('--max-nucleotides')
+@click.option('--max-sequences')
+@click.option('--max-file-size')
+@click.option('--remove-file/--no-remove-file')
+@click.argument('sequences', type=click.File('r'))
+@click.argument('output', type=click.Path())
+def main(sequences,
+         output,
+         max_nucleotides=None,
+         max_sequences=None,
+         max_file_size=None,
+         format_name=None,
+         remove_file=False,
+         ):
+    """
+    Split a fasta file in several ways. Any combination of the maximum number of
+    sequences and maximum number of nucleotides or total file size per chunk.
+    The file size limit is really the size of sequences in the file as it does
+    not count newlines that will be part of the fasta file. Additionally, it is
+    parsed as powers of 2, so 1KB is 1024 not 1000 bytes.
+    """
+
+    bio_format = format_name
+    if format_name == 'ncr':
+        bio_format = 'embl'
+
+    base = os.path.basename(sequences.name)
+    basename, _ = os.path.splitext(base)
+    limits = Limit.build(max_sequences, max_nucleotides, max_file_size)
+    chunks = chunked(sequences, limits, format_name=bio_format)
+
+    if not os.path.exists(output):
+        os.makedirs(output)
+
+
+    for index, seqs in enumerate(chunks):
+        filename = os.path.join(output, f"{basename}-{index}.{format_name}")
+        if os.path.exists(filename):
+            raise ValueError(f"Will not overwrite existing file {filename}")
+        with open(filename, 'w') as out:
+            SeqIO.write(seqs, out, bio_format)
+
+    if remove_file:
+        os.remove(sequences.name)
+
+
+if __name__ == "__main__":
+    main()
