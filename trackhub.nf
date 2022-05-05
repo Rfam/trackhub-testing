@@ -50,7 +50,7 @@ process fetch_gca {
     echo "Too many genomes"
     exit 1
   fi
-  head -1 genomes | xargs -I {} mv {} '${ucsc}.fasta'
+  head -1 genomes | xargs -I {} cp {} '${ucsc}.fasta'
   esl-seqstat '${ucsc}.fasta' > stats
   """
 }
@@ -84,13 +84,18 @@ process split_genome {
   tag { "$ucsc" }
 
   input:
-  tuple val(ucsc), path(genome)
+  tuple val(ucsc), path('raw-genome.fasta')
 
   output:
   tuple val(ucsc), path('parts/*.fasta')
 
   """
-  split-sequences --max-nucleotides 2e5 '$genome' parts/
+  chromToUcsc --get "$ucsc"
+
+  seqkit fx2tab --only-id raw-genome.fasta | chromToUcsc -a "${ucsc}.chromAlias.tsv" > genome.tsv
+  seqkit tab2fx genome.tsv > genome.fasta
+
+  split-sequences --max-nucleotides 2e5 genome.fasta parts/
   """
 }
 
@@ -136,7 +141,7 @@ process cmsearch {
 }
 
 process save_tblout {
-  publishDir "$baseDir/results"
+  publishDir "$baseDir/results", mode: "copy"
 
   input:
   tuple val(ucsc), path('raw*.tblout')
@@ -156,16 +161,16 @@ process save_tblout {
 }
 
 process save_output {
-  publishDir "$baseDir/results"
+  publishDir "$baseDir/results", mode: "copy"
 
   input:
-  tuple val(ucsc), path(output)
+  tuple val(ucsc), path('raw*.txt')
 
   output:
   path("${ucsc}.output.gz")
 
   """
-  cat $output > ${ucsc}.output
+  cat raw*.txt > ${ucsc}.output
   gzip ${ucsc}.output
   """
 }
@@ -175,6 +180,7 @@ workflow build_track_hub {
 
   Channel.fromPath("genomes.txt") \
   | splitCsv \
+  | first \
   | branch {
     gca: it[2].startsWith("GCA")
     gcf: it[2].startsWith("GCF")
@@ -204,7 +210,11 @@ workflow build_track_hub {
 
   genome_chunks \
   | combine(models) \
-  | join(z_values) \
+  | set { to_scan }
+
+  z_values \
+  | cross(to_scan) \
+  | map { z_values, chunks -> chunks + z_values[1] } \
   | cmsearch
 
   cmsearch.out.output | groupTuple | save_output
