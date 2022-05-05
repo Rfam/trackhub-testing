@@ -15,7 +15,7 @@ process randomize {
   output:
   path("models/*.cm")
 
-  """
+    """
   mkdir model-list models
   cmstat $all | grep -v '^#' | awk '{ print \$3 }' | shuf > all.list
   split --lines 100 --additional-suffix='.list' all.list model-list/
@@ -84,18 +84,13 @@ process split_genome {
   tag { "$ucsc" }
 
   input:
-  tuple val(ucsc), path('raw-genome.fasta')
+  tuple val(ucsc), path(genome)
 
   output:
   tuple val(ucsc), path('parts/*.fasta')
 
   """
-  chromToUcsc --get "$ucsc"
-
-  seqkit fx2tab --only-id raw-genome.fasta | chromToUcsc -a "${ucsc}.chromAlias.tsv" > genome.tsv
-  seqkit tab2fx genome.tsv > genome.fasta
-
-  split-sequences --max-nucleotides 2e5 genome.fasta parts/
+  split-sequences --max-nucleotides 2e5 $genome parts/
   """
 }
 
@@ -141,27 +136,48 @@ process cmsearch {
 }
 
 process save_tblout {
+  tag "${ucsc}"
   publishDir "$baseDir/results", mode: "copy"
 
   input:
   tuple val(ucsc), path('raw*.tblout')
 
   output:
-  tuple path("${ucsc}.tblout.gz"), path("${ucsc}.bed"), path("${ucsc}.bb")
+  tuple val(ucsc), path("${ucsc}.tblout.gz"), path("${ucsc}.bed")
 
   """
   cat raw*.tblout > ${ucsc}-merged.tblout
   cmsearch-deoverlap.pl ${ucsc}-merged.tblout
   mv ${ucsc}-merged.tblout.deoverlapped ${ucsc}.tblout
+  gzip --keep ${ucsc}.tblout
+  tblout2bed.pl ${ucsc}.tblout > ${ucsc}.bed
+  """
+}
 
-  tblout2bigBed.pl ${ucsc}.tblout $ucsc
-  mv ${ucsc}.tblout.bed ${ucsc}.bed
-  mv ${ucsc}.tblout.bb ${ucsc}.bb
-  gzip ${ucsc}.tblout
+process bed_to_bigbed {
+  tag "${ucsc}"
+  errorStrategy 'ignore'
+  publishDir "$baseDir/results", mode: "copy"
+
+  input:
+  tuple val(ucsc), path(_tblout), path(bed)
+
+  output:
+  tuple path("${ucsc}.bb"), path("${ucsc}_ucsc.bed")
+
+  """
+  fetchChromSizes "$ucsc" > chrom.sizes
+  chromToUcsc --get "$ucsc"
+
+  chromToUcsc -a "${ucsc}.chromAlias.tsv" -i "$bed" |\
+  LC_COLLATE=C sort -k1,1 -k2,2n > "${ucsc}_ucsc.bed"
+
+  bedToBigBed "${ucsc}_ucsc.bed" chrom.sizes "${ucsc}.bb"
   """
 }
 
 process save_output {
+  tag "${ucsc}"
   publishDir "$baseDir/results", mode: "copy"
 
   input:
@@ -171,8 +187,7 @@ process save_output {
   path("${ucsc}.output.gz")
 
   """
-  cat raw*.txt > ${ucsc}.output
-  gzip ${ucsc}.output
+  cat raw*.txt | gzip > ${ucsc}.output.gz
   """
 }
 
@@ -218,7 +233,10 @@ workflow build_track_hub {
   | cmsearch
 
   cmsearch.out.output | groupTuple | save_output
-  cmsearch.out.tblout | groupTuple | save_tblout
+  cmsearch.out.tblout \
+  | groupTuple \
+  | save_tblout \
+  | bed_to_bigbed
 }
 
 workflow {
