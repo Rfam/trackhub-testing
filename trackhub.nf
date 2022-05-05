@@ -147,7 +147,7 @@ process save_tblout {
   tuple val(ucsc), path('raw*.tblout')
 
   output:
-  tuple path("${ucsc}.tblout.gz"), path("${ucsc}.bed")
+  tuple path("${ucsc}.tblout.gz"), path("${ucsc}.bed"), path("${ucsc}.bb")
 
   """
   cat raw*.tblout > ${ucsc}-merged.tblout
@@ -156,6 +156,7 @@ process save_tblout {
 
   tblout2bigBed.pl ${ucsc}.tblout $ucsc
   mv ${ucsc}.tblout.bed ${ucsc}.bed
+  mv ${ucsc}.tblout.bb ${ucsc}.bb
   gzip ${ucsc}.tblout
   """
 }
