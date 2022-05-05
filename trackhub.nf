@@ -180,7 +180,6 @@ workflow build_track_hub {
 
   Channel.fromPath("genomes.txt") \
   | splitCsv \
-  | first \
   | branch {
     gca: it[2].startsWith("GCA")
     gcf: it[2].startsWith("GCF")
