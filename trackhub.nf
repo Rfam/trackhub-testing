@@ -1,10 +1,12 @@
 process fetch_models {
+  input:
+  val(rfam_url)
+
   output:
   path("Rfam.cm")
 
   """
-  wget "http://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.cm.gz"
-  gzip -d Rfam.cm
+  wget -O - "$rfam_url" | gzip -d > Rfam.cm
   """
 }
 
@@ -15,11 +17,11 @@ process randomize {
   output:
   path("models/*.cm")
 
-    """
+  """
   mkdir model-list models
-  cmstat $all | grep -v '^#' | awk '{ print \$3 }' | shuf > all.list
+  cmstat "$all" | grep -v '^#' | awk '{ print \$3 }' | shuf > all.list
   split --lines 100 --additional-suffix='.list' all.list model-list/
-  find model-list -name '*.list' | parallel cmfetch -o models/{/}.cm -f $all {}
+  find model-list -name '*.list' | parallel cmfetch -o models/{/}.cm -f "$all" {}
   """
 }
 
@@ -41,10 +43,10 @@ process fetch_gca {
     --exclude-rna \
     --assembly-level chromosome \
     --filename genome.zip \
-    $genome_accession
+    "$genome_accession"
 
   unzip genome.zip
-  find ncbi_dataset/data/$genome_accession/ -name '$genome_accession*_genomic.fna' > genomes
+  find "ncbi_dataset/data/$genome_accession/" -name '$genome_accession*_genomic.fna' > genomes
   lines="\$(wc -l genomes | awk '{ print \$1 }')"
   if [[ "\$lines" -ne 1 ]]; then
     echo "Too many genomes"
@@ -73,7 +75,7 @@ process fetch_gcf {
     --exclude-rna \
     --assembly-level chromosome \
     --filename genome.zip \
-    $genome_accession
+    "$genome_accession"
   unzip genome.zip
   find ncbi_dataset/data -name 'chr*.fna' | grep -v '.scaf.fna' | xargs cat > '${ucsc}.fasta'
   esl-seqstat '${ucsc}.fasta' > stats
@@ -90,7 +92,7 @@ process split_genome {
   tuple val(ucsc), path('parts/*.fasta')
 
   """
-  split-sequences --max-nucleotides 2e5 $genome parts/
+  split-sequences --max-nucleotides 2e5 "$genome" parts/
   """
 }
 
@@ -103,6 +105,7 @@ process compute_z_value {
   output:
   path('z_score')
 
+  script:
   """
   echo -n "$ucsc," > z_score
   grep 'Total # residues: ' stats | cut -d: -f2 | awk '{ print "scale = 6; (2.0000 * " \$1 ") / 1000000" }' | bc >> z_score
@@ -110,7 +113,7 @@ process compute_z_value {
 }
 
 process cmsearch {
-  tag { "$ucsc:$genome:$cms" }
+  tag { "$genome:$cms" }
   /* cpus 8 */
   /* memory 20.GB */
 
@@ -123,15 +126,15 @@ process cmsearch {
 
   """
   cmsearch \
-    -o ${ucsc}.txt \
-    -Z $z_value \
+    -o "${ucsc}.txt" \
+    -Z "$z_value" \
     --cpu 8 \
-    --tblout ${ucsc}.tblout \
+    --tblout "${ucsc}.tblout" \
     --cut_ga \
     --rfam \
     --nohmmonly \
-    $cms \
-    $genome
+    "$cms" \
+    "$genome"
   """
 }
 
@@ -146,15 +149,15 @@ process save_tblout {
   tuple val(ucsc), path("${ucsc}.tblout.gz"), path("${ucsc}.bed")
 
   """
-  cat raw*.tblout > ${ucsc}-merged.tblout
-  cmsearch-deoverlap.pl ${ucsc}-merged.tblout
-  mv ${ucsc}-merged.tblout.deoverlapped ${ucsc}.tblout
-  gzip --keep ${ucsc}.tblout
-  tblout2bed.pl ${ucsc}.tblout > ${ucsc}.bed
+  cat raw*.tblout > "${ucsc}-merged.tblout"
+  cmsearch-deoverlap.pl "${ucsc}-merged.tblout"
+  mv "${ucsc}-merged.tblout.deoverlapped" "${ucsc}.tblout"
+  gzip --keep "${ucsc}.tblout"
+  tblout2bed.pl "${ucsc}.tblout" > "${ucsc}.bed"
   """
 }
 
-process bed_to_bigbed {
+process build_ucsc_bed {
   tag "${ucsc}"
   errorStrategy 'ignore'
   publishDir "$baseDir/results", mode: "copy"
@@ -187,14 +190,19 @@ process save_output {
   path("${ucsc}.output.gz")
 
   """
-  cat raw*.txt | gzip > ${ucsc}.output.gz
+  cat raw*.txt | gzip > "${ucsc}.output.gz"
   """
 }
 
 workflow build_track_hub {
-  fetch_models | randomize | flatten | set { models }
+  Channel.of(params.models) \
+  | map { name -> params.rfam[name] } \
+  | fetch_models \
+  | randomize \
+  | flatten \
+  | set { models }
 
-  Channel.fromPath("genomes.txt") \
+  Channel.fromPath(params.genomes) \
   | splitCsv \
   | branch {
     gca: it[2].startsWith("GCA")
@@ -213,30 +221,28 @@ workflow build_track_hub {
   specs.gca | fetch_gca
   specs.gcf | fetch_gcf
 
-  fetch_gca.out.genome.mix(fetch_gcf.out.genome) \
+  fetch_gca.out.genome.mix(fetch_gcf.out.genome) | set { genomes }
+  fetch_gca.out.stats.mix(fetch_gcf.out.stats) | set { stats }
+
+  genomes \
   | split_genome \
   | transpose \
-  | set { genome_chunks }
-
-  fetch_gca.out.stats.mix(fetch_gcf.out.stats) \
-  | compute_z_value \
-  | splitCsv \
-  | set { z_values }
-
-  genome_chunks \
   | combine(models) \
   | set { to_scan }
 
-  z_values \
+  stats \
+  | compute_z_value \
+  | splitCsv \
   | cross(to_scan) \
   | map { z_values, chunks -> chunks + z_values[1] } \
   | cmsearch
 
   cmsearch.out.output | groupTuple | save_output
+
   cmsearch.out.tblout \
   | groupTuple \
   | save_tblout \
-  | bed_to_bigbed
+  | build_ucsc_bed
 }
 
 workflow {
