@@ -133,6 +133,7 @@ process cmsearch {
     --cut_ga \
     --rfam \
     --nohmmonly \
+    --notextw \
     "$cms" \
     "$genome"
   """
